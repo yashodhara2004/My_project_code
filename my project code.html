@@ -1,0 +1,181 @@
+// Sending Blynk experiment messages to Serial Monitor 
+#define BLYNK_PRINT Serial 
+
+// Keep your Blynk details here
+#define BLYNK_TEMPLATE_ID "TMPL6FqyMRl5R"
+#define BLYNK_TEMPLATE_NAME "New Template"
+#define BLYNK_AUTH_TOKEN "xrnpHEPe6r1VfmjcxWHhniEjm_1UUKyD"
+
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <BlynkSimpleEsp32.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <LiquidCrystal_I2C.h>
+
+// Keep your  Wi-Fi details here
+char ssid[] = "Galaxy A04e 0127";
+char pass[] = "12345670";
+
+
+// (Pins)
+#define ONE_WIRE_BUS 4       
+#define PH_PIN 34            
+#define TURBIDITY_PIN 35     
+#define BUZZER_PIN 23        
+
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+
+// Make the LCD  I2C address into 0x3F
+LiquidCrystal_I2C lcd(0x27, 16, 2); 
+
+// Variables
+float tempValue = 0;
+float phValue = 0;
+float turbidityVoltage = 0;
+
+unsigned long previousMillis = 0;
+const long displayInterval = 2000; // Screen is change every two seconds
+int displayState = 0; 
+
+bool isTempAlert = false;
+bool isPhAlert = false;
+bool isTurbAlert = false;
+int alertCount = 0;
+
+void setup() {
+  Serial.begin(115200);
+  // Wait 2 seconds until the LCD is fully powered on (to prevent showing blocks)
+  delay(2000); 
+
+  Serial.println("\n--- System start ---");
+
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
+
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0, 0);
+  lcd.print("System Starting.");
+
+  sensors.begin();
+  Blynk.begin(BLYNK_AUTH_TOKEN, ssid, pass);
+  lcd.clear();
+}
+
+float getFilteredAnalog(int pin) {
+  float sum = 0;
+  for(int i = 0; i < 5; i++) {
+    sum += analogRead(pin);
+    delay(10); 
+  }
+  return sum / 5.0; 
+}
+
+void loop() {
+  Blynk.run(); 
+
+  // 1. Temperature
+  sensors.requestTemperatures();
+  tempValue = sensors.getTempCByIndex(0);
+
+  // 2. pH Value
+  float phAnalog = getFilteredAnalog(PH_PIN);
+  float phVoltage = phAnalog * (3.3 / 4095.0); 
+  float rawPh = -5.70 * phVoltage + 20.00; 
+  phValue = rawPh + ((25.0 - tempValue) * 0.03); 
+
+  // 3. Turbidity Value
+  float turbAnalog = getFilteredAnalog(TURBIDITY_PIN);
+  turbidityVoltage = turbAnalog * (3.3 / 4095.0);
+
+  // 4. Threshold Test
+  isTempAlert = (tempValue < 20.0 || tempValue > 35.0);
+  isPhAlert = (phValue < 7.5 || phValue > 8.5);
+  isTurbAlert = (turbidityVoltage < 0.6); 
+
+  alertCount = isTempAlert + isPhAlert + isTurbAlert;
+
+  if (alertCount > 0) {
+    digitalWrite(BUZZER_PIN, HIGH); 
+  } else {
+    digitalWrite(BUZZER_PIN, LOW);
+  }
+
+  // 5. LCD UI Logic (Updated error free method)
+  unsigned long currentMillis = millis();
+  if (currentMillis - previousMillis >= displayInterval) {
+    previousMillis = currentMillis;
+    lcd.clear();
+
+    if (alertCount == 0) {
+      // When there is no risk
+      lcd.setCursor(0, 0); lcd.print("Status: SAFE");
+      lcd.setCursor(0, 1);
+      if (displayState == 0) { lcd.print("Temp: "); lcd.print(tempValue); lcd.print(" C"); } 
+      else if (displayState == 1) { lcd.print("pH Lvl: "); lcd.print(phValue); } 
+      else { lcd.print("Turbidity: Low"); }
+      displayState = (displayState + 1) % 3; 
+      
+    } else if (alertCount == 1) {
+      // When there is only one error
+      lcd.setCursor(0, 0);
+      if (isTempAlert) { lcd.print("TEMP ALERT!"); lcd.setCursor(0, 1); lcd.print("Temp: "); lcd.print(tempValue); lcd.print(" C"); } 
+      else if (isPhAlert) { if(phValue < 7.5) lcd.print("ACIDIC WATER!"); else lcd.print("ALKALINE WATER!"); lcd.setCursor(0, 1); lcd.print("pH Lvl: "); lcd.print(phValue); } 
+      else if (isTurbAlert) { lcd.print("HIGH TURBIDITY!"); lcd.setCursor(0, 1); lcd.print("Dirty Water!"); }
+      
+    } else {
+      // When there are 2 or 3 errors (Multiple Alerts)
+      bool displayed = false;
+      for (int i = 0; i < 3; i++) {
+        if (displayState == 0 && isTempAlert) { 
+          lcd.setCursor(0, 0); lcd.print("TEMP ALERT!"); lcd.setCursor(0, 1); lcd.print("Temp: "); lcd.print(tempValue); lcd.print(" C"); 
+          displayed = true; 
+        } 
+        else if (displayState == 1 && isPhAlert) { 
+          lcd.setCursor(0, 0); if(phValue < 7.5) lcd.print("ACIDIC WATER!"); else lcd.print("ALKALINE WATER!"); lcd.setCursor(0, 1); lcd.print("pH Lvl: "); lcd.print(phValue); 
+          displayed = true; 
+        } 
+        else if (displayState == 2 && isTurbAlert) { 
+          lcd.setCursor(0, 0); lcd.print("HIGH TURBIDITY!"); lcd.setCursor(0, 1); lcd.print("Dirty Water!"); 
+          displayed = true; 
+        }
+        
+        displayState = (displayState + 1) % 3; 
+        if (displayed) break; // Pause until the next round after the letters are displayed on the screen
+      }
+    }
+  }
+
+  // 6. Send to Blynk 
+  Blynk.virtualWrite(V0, tempValue);
+  Blynk.virtualWrite(V1, phValue);
+  Blynk.virtualWrite(V2, turbidityVoltage);
+  // 7. New Alert Labels Sent to Blynk 
+  
+  // Temperature Status 
+  if (isTempAlert) {
+    Blynk.virtualWrite(V3, "TEMP ALERT!");
+  } else {
+    Blynk.virtualWrite(V3, "Normal");
+  }
+
+  // pH Status
+  if (isPhAlert) {
+    if (phValue < 6.5) {
+      Blynk.virtualWrite(V4, "ACIDIC WATER!");
+    } else {
+      Blynk.virtualWrite(V4, "ALKALINE WATER!");
+    }
+  } else {
+    Blynk.virtualWrite(V4, "Normal");
+  }
+
+  // Turbidity Status
+  if (isTurbAlert) {
+    Blynk.virtualWrite(V5, "HIGH TURBIDITY!");
+  } else {
+    Blynk.virtualWrite(V5, "Normal");
+  }
+}
